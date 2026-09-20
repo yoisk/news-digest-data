@@ -1,0 +1,64 @@
+name: Collect News Candidates
+
+on:
+  schedule:
+    - cron: '20 20 * * *'   # UTC 20:20 = JST 05:20（Claudeのタスクは JST 06:00 に読む）
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: collect
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install feedparser python-dateutil pyyaml
+
+      - name: Restore config from secret
+        env:
+          CONFIG_YAML: ${{ secrets.CONFIG_YAML }}
+        run: |
+          if [ -z "$CONFIG_YAML" ]; then
+            echo "::error::CONFIG_YAML secret is not set"; exit 1
+          fi
+          printf '%s' "$CONFIG_YAML" > config.yaml
+          python3 -c "import yaml;c=yaml.safe_load(open('config.yaml'));print('topics:',len(c['news']['topics']))"
+
+      - name: Fetch candidates
+        run: python3 fetch_news.py --config config.yaml --out data/latest.json
+
+      - name: Archive and prune
+        run: |
+          DATE=$(TZ=Asia/Tokyo date +%F)
+          mkdir -p data/archive
+          cp data/latest.json "data/archive/$DATE.json"
+          ls -1 data/archive/*.json | sort | head -n -30 | xargs -r rm -f
+          rm -f config.yaml
+
+      - name: Commit
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data
+          git diff --quiet --cached && echo "no changes" && exit 0
+          git commit -m "data: candidates for $(TZ=Asia/Tokyo date +%F) [skip ci]"
+          git push
+
+      - name: Summary
+        run: |
+          python3 - <<'PY'
+          import json
+          m = json.load(open('data/latest.json'))['meta']
+          print('total:', m['total'], 'by region:', m['counts_by_region'])
+          PY
