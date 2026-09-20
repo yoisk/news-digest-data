@@ -19,6 +19,13 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote_plus
 
+# macOS の Python はシステムCAを見ないことがあるため certifi を優先する
+try:
+    import os as _os, certifi as _certifi
+    _os.environ.setdefault("SSL_CERT_FILE", _certifi.where())
+except Exception:
+    pass
+
 import feedparser
 import yaml
 from dateutil import parser as dateutil_parser
