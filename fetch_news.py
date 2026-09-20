@@ -124,12 +124,85 @@ def fetch_one(job):
     return out
 
 
+
+# ---------------------------------------------------------------------------
+# Google News の中継URL（news.google.com/rss/articles/CBMi...）を
+# 実際の記事URLに解決する。解決できない場合は中継URLをそのまま使う。
+# ---------------------------------------------------------------------------
+UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+
+
+def _resolve_google_url(gurl, timeout=20):
+    import urllib.request, urllib.parse, json as _json
+    if "news.google.com" not in gurl or "/articles/" not in gurl:
+        return gurl
+    token = gurl.split("/articles/")[1].split("?")[0]
+    try:
+        html = urllib.request.urlopen(
+            urllib.request.Request(gurl, headers={"User-Agent": UA}), timeout=timeout
+        ).read().decode("utf-8", "ignore")
+        sg = re.search(r'data-n-a-sg="([^"]+)"', html)
+        ts = re.search(r'data-n-a-ts="([^"]+)"', html)
+        if not (sg and ts):
+            return gurl
+        inner = _json.dumps(["garturlreq", [["X", "X", ["X", "X"], None, None, 1, 1,
+                                             "US:en", None, 1, None, None, None, None,
+                                             None, 0, 1],
+                                            "X", "X", 1, [1, 1, 1], 1, 1, None, 0, 0,
+                                            None, 0],
+                             token, int(ts.group(1)), sg.group(1)])
+        payload = _json.dumps([[["Fbv4je", inner, None, "generic"]]])
+        body = urllib.parse.urlencode({"f.req": payload}).encode()
+        res = urllib.request.urlopen(
+            urllib.request.Request(
+                "https://news.google.com/_/DotsSplashUi/data/batchexecute",
+                data=body,
+                headers={"User-Agent": UA,
+                         "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"}),
+            timeout=timeout).read().decode("utf-8", "ignore")
+        m = re.search(r'garturlres\\",\\"(https?://[^\\"]+)', body_text := res)
+        if m:
+            return m.group(1)
+        m = re.search(r'(https?://(?!news\.google)[^\\"]+)', body_text)
+        return m.group(1) if m else gurl
+    except Exception:
+        return gurl
+
+
+def resolve_articles(articles, workers=8):
+    """各記事の url を実記事URLに置き換え、中継URLは google_url に退避する。"""
+    from concurrent.futures import ThreadPoolExecutor
+    urls = [a["url"] for a in articles]
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        resolved = list(pool.map(_resolve_google_url, urls))
+    ok = 0
+    for a, r in zip(articles, resolved):
+        a["google_url"] = a["url"]
+        a["url"] = r
+        if "news.google.com" not in r:
+            ok += 1
+    print(f"Resolved {ok}/{len(articles)} article URLs to publisher links", file=sys.stderr)
+    return articles
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="config.yaml")
     ap.add_argument("--out", default="data/latest.json")
     ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--no-resolve", action="store_true",
+                    help="Google News の中継URLを解決しない")
+    ap.add_argument("--resolve-only", metavar="JSON",
+                    help="既存の収集JSONのURLだけを解決して上書きする")
     args = ap.parse_args()
+
+    if args.resolve_only:
+        with open(args.resolve_only, encoding="utf-8") as f:
+            payload = json.load(f)
+        resolve_articles(payload["articles"], workers=args.workers)
+        with open(args.resolve_only, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
+        return
 
     config = yaml.safe_load(open(args.config, encoding="utf-8"))
     news = config["news"]
@@ -151,6 +224,9 @@ def main():
                 if a["id"] not in seen:
                     seen.add(a["id"])
                     articles.append(a)
+
+    if not args.no_resolve and articles:
+        resolve_articles(articles, workers=args.workers)
 
     articles.sort(key=lambda a: a["published_at"], reverse=True)
     payload = {
