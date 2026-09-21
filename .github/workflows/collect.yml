@@ -2,7 +2,7 @@ name: Collect News Candidates
 
 on:
   schedule:
-    - cron: '20 20 * * *'   # UTC 20:20 = JST 05:20（Claudeのタスクは JST 06:00 に読む）
+    - cron: '20 15 * * *'   # UTC 15:20 = JST 00:20（Claudeのタスクは JST 06:00 に読む）
   workflow_dispatch:
 
 permissions:
