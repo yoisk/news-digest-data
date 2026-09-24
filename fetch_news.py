@@ -163,6 +163,41 @@ def fetch_one(job):
     return out, "ok"
 
 
+# ウォッチ企業の分類（本拠地）→ 検索先。日本語の社名は分類にかかわらず日本語版で検索する。
+CATEGORY_TO_QUERY_KEY = {"jp": "ja", "apac": "en_asia", "na": "en_us", "eu": "en_eu", "other": "en_us"}
+CONTEXT_TERMS = {"ja": "(医療 OR ヘルスケア OR 健康 OR 薬)", "en": "(health OR healthcare OR medical)"}
+_JA_CHARS = re.compile(r"[\u3040-\u30fa\u30fc-\u30ff\u3400-\u9fff]")  # 「・」は除く
+
+
+def watch_item_to_query(item):
+    """ウォッチ企業1件を (検索先, 検索語) にする。
+
+    - 社名の括弧書き（例「PPD（Thermo Fisher）」）と末尾の「HD」は検索に使わない
+    - 英字の社名が「・」でつながっているもの（例「UnitedHealth・Optum」）は OR 検索にする
+    - 条件メモに「〜文脈のみ」とあれば、その文脈の語を AND で足す
+    """
+    name = re.sub(r"[（(].*?[）)]", "", item.get("name") or "").strip()
+    name = re.sub(r"\s*HD$", "", name)  # 「ツルハHD」「SOMPO HD」は記事中では略さないことが多い
+    if not name:
+        return None, None
+    ja = bool(_JA_CHARS.search(name))
+    parts = [name] if ja else [p.strip() for p in re.split(r"[・/]", name) if p.strip()]
+    terms = " OR ".join(f'"{p}"' for p in parts)
+    query = f"({terms})" if len(parts) > 1 else terms
+
+    category = (item.get("category") or "other").split("-")[0]
+    query_key = "ja" if ja else CATEGORY_TO_QUERY_KEY.get(category, "en_us")
+
+    note = item.get("note") or ""
+    if "文脈" in note:
+        m = re.match(r"\s*(.+?)(?:事業)?の?文脈", note)
+        ctx = m.group(1).strip() if m else ""
+        if not ctx or "ヘルスケア" in ctx or "医療" in ctx:
+            ctx = CONTEXT_TERMS["ja" if query_key == "ja" else "en"]
+        query = f"{query} {ctx}"
+    return query_key, query
+
+
 def load_watch_queries():
     """Google Drive の watch-queries.json からウォッチ企業の検索語を読む。
     GDRIVE_SA_JSON が無い、またはファイルが無い・読めないときは警告して空リストを返す。
@@ -200,10 +235,14 @@ def load_watch_queries():
 
     out, seen = [], set()
     for item in data.get("items") or []:
-        if not isinstance(item, dict):
+        if not isinstance(item, dict) or item.get("active") is False:
             continue
-        query = (item.get("query") or "").strip()
-        query_key = REGION_TO_QUERY_KEY.get((item.get("region") or "").strip())
+        if "category" in item:
+            # ヘルスケア・ダイジェストのウォッチ企業（name / category / note / active）
+            query_key, query = watch_item_to_query(item)
+        else:
+            query = (item.get("query") or "").strip()
+            query_key = REGION_TO_QUERY_KEY.get((item.get("region") or "").strip())
         if not query or not query_key:
             print(f"  ! skipping invalid watch item: {item}", file=sys.stderr)
             continue
