@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: '20 15 * * *'   # UTC 15:20 = JST 00:20（Claudeのタスクは JST 06:00 に読む）
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'fetch_news.py'
+      - '.github/workflows/collect.yml'
 
 permissions:
   contents: write
@@ -23,7 +28,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install feedparser python-dateutil pyyaml
+        run: pip install feedparser python-dateutil pyyaml google-auth google-api-python-client
 
       - name: Restore config from secret
         env:
@@ -36,6 +41,8 @@ jobs:
           python3 -c "import yaml;c=yaml.safe_load(open('config.yaml'));print('topics:',len(c['news']['topics']))"
 
       - name: Fetch candidates
+        env:
+          GDRIVE_SA_JSON: ${{ secrets.GDRIVE_SA_JSON }}
         run: python3 fetch_news.py --config config.yaml --out data/latest.json
 
       - name: Archive and prune
@@ -61,4 +68,6 @@ jobs:
           import json
           m = json.load(open('data/latest.json'))['meta']
           print('total:', m['total'], 'by region:', m['counts_by_region'])
+          print('queries run/empty/failed:', m['queries_run'], m.get('queries_empty'), m.get('queries_failed'),
+                'watch:', m.get('watch_queries'))
           PY

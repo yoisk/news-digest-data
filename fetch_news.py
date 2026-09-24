@@ -13,16 +13,19 @@ fetch_news.py - Google News RSS から候補記事を収集し JSON として出
 import argparse
 import hashlib
 import json
+import os
+import random
 import re
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote_plus
 
 # macOS の Python はシステムCAを見ないことがあるため certifi を優先する
 try:
-    import os as _os, certifi as _certifi
-    _os.environ.setdefault("SSL_CERT_FILE", _certifi.where())
+    import certifi as _certifi
+    os.environ.setdefault("SSL_CERT_FILE", _certifi.where())
 except Exception:
     pass
 
@@ -40,6 +43,16 @@ RSS_ENDPOINTS = {
 }
 QUERY_KEY_TO_REGION = {"ja": "japan", "en_us": "us", "en_asia": "asia_oceania", "en_eu": "eu"}
 QUERY_KEY_TO_LANGUAGE = {"ja": "ja", "en_us": "en", "en_asia": "en", "en_eu": "en"}
+REGION_TO_QUERY_KEY = {v: k for k, v in QUERY_KEY_TO_REGION.items()}
+
+# Google News 側のレート制限を避けるための間隔・再試行設定
+QUERY_DELAY_RANGE = (0.5, 1.0)   # 検索ごとの待ち時間（秒）
+MAX_RETRIES = 2                  # 失敗時の取り直し回数
+RETRY_BACKOFF = 3.0              # 取り直し前の待ち時間（秒）× 試行回数
+
+WATCH_TOPIC = "ウォッチ企業・競合モニタリング"
+WATCH_FOLDER_ID = "18oXR5jea0SLwSmZEZDyl8rxps_32mE6y"
+WATCH_FILE_NAME = "watch-queries.json"
 
 BLOCKED_DOMAINS = {
     "starnewskorea.com", "koreaboo.com", "soompi.com", "allkpop.com", "kpopstarz.com",
@@ -85,15 +98,39 @@ def clean_title(title):
     return title.rsplit(" - ", 1)[0].strip() if " - " in title else (title or "").strip()
 
 
+def _fetch_feed(url, label):
+    """RSS を取得する。status が 200 以外、または bozo で空のときは間隔をあけて取り直す。
+    成功時は feed、最終的に失敗したときは None を返す。"""
+    for attempt in range(MAX_RETRIES + 1):
+        if attempt:
+            time.sleep(RETRY_BACKOFF * attempt + random.uniform(0, 1))
+        try:
+            feed = feedparser.parse(url, agent=UA)
+        except Exception as e:
+            reason = str(e)
+        else:
+            status = feed.get("status")
+            if status != 200:
+                reason = f"status={status}" + (f" ({feed.get('bozo_exception')})" if status is None else "")
+            elif feed.bozo and not feed.entries:
+                reason = f"bozo: {feed.get('bozo_exception')}"
+            else:
+                return feed
+        print(f"  ! {label} attempt {attempt + 1}/{MAX_RETRIES + 1} failed: {reason}", file=sys.stderr)
+    return None
+
+
 def fetch_one(job):
+    """(記事リスト, 結果) を返す。結果は "ok" / "empty" / "failed"。"""
     topic_name, query_key, query, cutoff, max_per_query = job
+    time.sleep(random.uniform(*QUERY_DELAY_RANGE))
     url = RSS_ENDPOINTS[query_key].format(query=quote_plus(query))
     out = []
-    try:
-        feed = feedparser.parse(url)
-    except Exception as e:
-        print(f"  ! failed [{query_key}]: {e}", file=sys.stderr)
-        return out
+    feed = _fetch_feed(url, f"[{query_key}] {query!r}")
+    if feed is None:
+        return out, "failed"
+    if not feed.entries:
+        return out, "empty"
     for entry in feed.entries[:max_per_query]:
         try:
             link = entry.get("link", "")
@@ -121,6 +158,57 @@ def fetch_one(job):
             })
         except Exception as e:
             print(f"  ! entry error: {e}", file=sys.stderr)
+    return out, "ok"
+
+
+def load_watch_queries():
+    """Google Drive の watch-queries.json からウォッチ企業の検索語を読む。
+    GDRIVE_SA_JSON が無い、またはファイルが無い・読めないときは警告して空リストを返す。
+    戻り値は [(query_key, query), ...]。"""
+    sa_json = os.environ.get("GDRIVE_SA_JSON", "").strip()
+    if not sa_json:
+        print("  ! GDRIVE_SA_JSON is not set; skipping watch queries", file=sys.stderr)
+        return []
+    try:
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+
+        creds = service_account.Credentials.from_service_account_info(
+            json.loads(sa_json),
+            scopes=["https://www.googleapis.com/auth/drive.readonly"])
+        drive = build("drive", "v3", credentials=creds, cache_discovery=False)
+        res = drive.files().list(
+            q=(f"name = '{WATCH_FILE_NAME}' and '{WATCH_FOLDER_ID}' in parents "
+               "and trashed = false"),
+            fields="files(id, name, modifiedTime)",
+            orderBy="modifiedTime desc",
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+        ).execute()
+        files = res.get("files", [])
+        if not files:
+            print(f"  ! {WATCH_FILE_NAME} not found in Drive folder; skipping watch queries",
+                  file=sys.stderr)
+            return []
+        raw = drive.files().get_media(fileId=files[0]["id"], supportsAllDrives=True).execute()
+        data = json.loads(raw.decode("utf-8-sig") if isinstance(raw, bytes) else raw)
+    except Exception as e:
+        print(f"  ! failed to load {WATCH_FILE_NAME} from Drive: {e}", file=sys.stderr)
+        return []
+
+    out, seen = [], set()
+    for item in data.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        query = (item.get("query") or "").strip()
+        query_key = REGION_TO_QUERY_KEY.get((item.get("region") or "").strip())
+        if not query or not query_key:
+            print(f"  ! skipping invalid watch item: {item}", file=sys.stderr)
+            continue
+        if (query_key, query) not in seen:
+            seen.add((query_key, query))
+            out.append((query_key, query))
+    print(f"Loaded {len(out)} watch queries from Drive", file=sys.stderr)
     return out
 
 
@@ -189,7 +277,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="config.yaml")
     ap.add_argument("--out", default="data/latest.json")
-    ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--workers", type=int, default=2,
+                    help="Google News への同時接続数")
+    ap.add_argument("--resolve-workers", type=int, default=8,
+                    help="記事URL解決の同時実行数")
     ap.add_argument("--no-resolve", action="store_true",
                     help="Google News の中継URLを解決しない")
     ap.add_argument("--resolve-only", metavar="JSON",
@@ -199,7 +290,7 @@ def main():
     if args.resolve_only:
         with open(args.resolve_only, encoding="utf-8") as f:
             payload = json.load(f)
-        resolve_articles(payload["articles"], workers=args.workers)
+        resolve_articles(payload["articles"], workers=args.resolve_workers)
         with open(args.resolve_only, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
         return
@@ -216,17 +307,28 @@ def main():
                 for q in queries:
                     jobs.append((topic["name"], query_key, q, cutoff, max_per_query))
 
+    existing = {(j[0], j[1], j[2]) for j in jobs}
+    watch_added = 0
+    for query_key, q in load_watch_queries():
+        if (WATCH_TOPIC, query_key, q) in existing:
+            continue
+        existing.add((WATCH_TOPIC, query_key, q))
+        jobs.append((WATCH_TOPIC, query_key, q, cutoff, max_per_query))
+        watch_added += 1
+
     print(f"Fetching {len(jobs)} queries with {args.workers} workers ...", file=sys.stderr)
     seen, articles = set(), []
+    outcomes = {"ok": 0, "empty": 0, "failed": 0}
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        for batch in pool.map(fetch_one, jobs):
+        for batch, outcome in pool.map(fetch_one, jobs):
+            outcomes[outcome] += 1
             for a in batch:
                 if a["id"] not in seen:
                     seen.add(a["id"])
                     articles.append(a)
 
     if not args.no_resolve and articles:
-        resolve_articles(articles, workers=args.workers)
+        resolve_articles(articles, workers=args.resolve_workers)
 
     articles.sort(key=lambda a: a["published_at"], reverse=True)
     payload = {
@@ -240,11 +342,13 @@ def main():
                                  for r in QUERY_KEY_TO_REGION.values()},
             "total": len(articles),
             "queries_run": len(jobs),
+            "queries_empty": outcomes["empty"],
+            "queries_failed": outcomes["failed"],
+            "watch_queries": watch_added,
         },
         "articles": articles,
     }
 
-    import os
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
