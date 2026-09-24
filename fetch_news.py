@@ -109,11 +109,13 @@ def _fetch_feed(url, label):
         except Exception as e:
             reason = str(e)
         else:
+            # feedparser はリダイレクトを追従したうえで status に 301/302 を残すため、
+            # 3xx でも entries が取れていれば成功とみなす
             status = feed.get("status")
-            if status != 200:
+            if status is None or status >= 400:
                 reason = f"status={status}" + (f" ({feed.get('bozo_exception')})" if status is None else "")
             elif feed.bozo and not feed.entries:
-                reason = f"bozo: {feed.get('bozo_exception')}"
+                reason = f"status={status} bozo: {feed.get('bozo_exception')}"
             else:
                 return feed
         print(f"  ! {label} attempt {attempt + 1}/{MAX_RETRIES + 1} failed: {reason}", file=sys.stderr)
