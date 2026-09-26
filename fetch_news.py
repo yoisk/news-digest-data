@@ -290,24 +290,59 @@ def _resolve_google_url(gurl, timeout=20):
                 headers={"User-Agent": UA,
                          "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"}),
             timeout=timeout).read().decode("utf-8", "ignore")
-        m = re.search(r'garturlres\\",\\"(https?://[^\\"]+)', body_text := res)
-        if m:
-            return m.group(1)
-        m = re.search(r'(https?://(?!news\.google)[^\\"]+)', body_text)
-        return m.group(1) if m else gurl
+        url = _extract_garturlres(res)
+        return url if url and _looks_complete(url) else gurl
     except Exception:
         return gurl
+
+
+def _extract_garturlres(res):
+    """batchexecute の応答から実記事URLを取り出す。
+
+    応答は二重に JSON エスケープされている（URL 中の "=" "&" は \\u003d / \\u0026）ため、
+    正規表現で切り出すと途中で切れる。行ごとに JSON としてデコードして取り出す。
+    """
+    import json as _json
+    for line in res.splitlines():
+        line = line.strip()
+        if not line.startswith("[["):
+            continue
+        try:
+            rows = _json.loads(line)
+        except ValueError:
+            continue
+        for row in rows:
+            if not (isinstance(row, list) and len(row) > 2 and row[0] == "wrb.fr"
+                    and isinstance(row[2], str)):
+                continue
+            try:
+                data = _json.loads(row[2])
+            except ValueError:
+                continue
+            if (isinstance(data, list) and len(data) > 1 and data[0] == "garturlres"
+                    and isinstance(data[1], str)):
+                return data[1]
+    return None
+
+
+def _looks_complete(url):
+    """途中で切れた・中継URLのままの URL を弾く。"""
+    if not re.match(r"https?://", url) or "news.google." in url:
+        return False
+    if "\\" in url:
+        return False
+    return not url.endswith(("?", "&", "="))
 
 
 def resolve_articles(articles, workers=8):
     """各記事の url を実記事URLに置き換え、中継URLは google_url に退避する。"""
     from concurrent.futures import ThreadPoolExecutor
-    urls = [a["url"] for a in articles]
+    urls = [a.get("google_url") or a["url"] for a in articles]
     with ThreadPoolExecutor(max_workers=workers) as pool:
         resolved = list(pool.map(_resolve_google_url, urls))
     ok = 0
     for a, r in zip(articles, resolved):
-        a["google_url"] = a["url"]
+        a["google_url"] = a.get("google_url") or a["url"]
         a["url"] = r
         if "news.google.com" not in r:
             ok += 1
