@@ -2,7 +2,7 @@
 
 ヘルスケア／ビジネスニュースの **収集結果（候補記事リスト）だけ** を置くデータ用リポジトリ。
 
-- 毎日 JST 05:20 に GitHub Actions が Google News RSS を収集し、`data/latest.json` を更新する
+- 毎日 JST 00:00 / 00:20 に Cloudflare Worker（Cron Trigger）が GitHub Actions を `workflow_dispatch` で起動し、Google News RSS を収集して `data/latest.json` を更新する（GitHub の `schedule` は遅延するため使わない）
 - JST 06:00 に Claude のスケジュールタスクが `data/latest.json` を読み、記事の選定・日本語要約・HTMLダイジェストの更新を行う
 - スコアリング・要約に外部APIキーは不要（Claude本体が実施）。メール配信は廃止
 
@@ -16,7 +16,7 @@
 | パス | 内容 |
 | --- | --- |
 | `fetch_news.py` | Google News RSS 収集スクリプト（収集のみ） |
-| `.github/workflows/collect.yml` | 毎日 05:20 JST の収集ジョブ |
+| `.github/workflows/collect.yml` | 収集ジョブ（`workflow_dispatch` で起動） |
 | `data/latest.json` | 直近の収集結果 |
 | `data/archive/YYYY-MM-DD.json` | 過去30日分 |
 
