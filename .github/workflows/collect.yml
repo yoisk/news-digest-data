@@ -1,8 +1,8 @@
 name: Collect News Candidates
 
 on:
-  schedule:
-    - cron: '20 15 * * *'   # UTC 15:20 = JST 00:20（Claudeのタスクは JST 06:00 に読む）
+  # 定期実行は Cloudflare Worker (news-digest-trigger) の Cron Trigger から
+  # workflow_dispatch で起動する。GitHub の schedule は遅延・スキップがあるため使わない。
   workflow_dispatch:
   push:
     branches: [main]
